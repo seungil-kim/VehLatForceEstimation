@@ -316,7 +316,7 @@ def make_sequence_dataset(scenario_list, dataset_name, sequence_length):
     return X_out, Y_out
 
 
-sequence_length = 20
+sequence_length = 50
 
 x_train_seq, y_train_seq = make_sequence_dataset(train_scenarios, "Train", sequence_length)
 x_val_seq, y_val_seq = make_sequence_dataset(sorted(val_scenarios),"Validation", sequence_length)
