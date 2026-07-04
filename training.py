@@ -31,6 +31,9 @@ from scipy.io import loadmat
 import os
 from sklearn.metrics import mean_squared_error
 
+import json
+import pickle
+
 # 현재 notebook 또는 Python 코드가 실행되는 프로젝트 폴더
 # PROJECT_DIR = Path.cwd().resolve()
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -40,6 +43,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 # OUTPUT_DIR = PROJECT_DIR / "output"
 DATA_DIR = Path(os.environ.get("DATA_DIR", PROJECT_DIR / "data"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", PROJECT_DIR / "output"))
+# OUTPUT_DIR=/root/kadap/MyDisk/lstm_output
 MODEL_DIR = OUTPUT_DIR / "models"
 RESULT_DIR = OUTPUT_DIR / "results"
 
@@ -279,6 +283,7 @@ y_scaler = MinMaxScaler()
 x_scaler.fit(X_train_raw_all)
 y_scaler.fit(Y_train_raw_all)
 
+
 def make_sequence_dataset(scenario_list, dataset_name, sequence_length):
     x_list = []
     y_list = []
@@ -305,6 +310,31 @@ def make_sequence_dataset(scenario_list, dataset_name, sequence_length):
     Y_out = np.concatenate(y_list, axis=0)
 
     return X_out, Y_out
+
+run_config = {
+    "sequence_length": sequence_length,
+    "batch_size": batch_size,
+    "hidden_size": hidden_size,
+    "num_layers": num_layers,
+    "learning_rate": 1e-3,
+    "num_epochs": num_epochs,
+    "train_scenarios": train_scenarios,
+    "validation_scenarios": val_scenarios,
+    "test_scenarios": test_scenarios,
+}
+
+with open(MODEL_DIR / "scalers.pkl", "wb") as f:
+    pickle.dump(
+        {
+            "x_scaler": x_scaler,
+            "y_scaler": y_scaler,
+        },
+        f
+    )
+
+with open(RESULT_DIR / "run_config.json", "w", encoding="utf-8") as f:
+    json.dump(run_config, f, ensure_ascii=False, indent=2)
+
 
 sequence_length = 5
 
@@ -376,7 +406,7 @@ model = LSTM(input_size = input_size,
 
 ## 손실함수 및 최적화 방법 정의 ##
 criterion = nn.MSELoss()
-num_epochs = 5
+num_epochs = 401
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 train_loss_graph = []
