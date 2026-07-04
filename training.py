@@ -42,6 +42,7 @@ torch.backends.cudnn.deterministic = True
 # 현재 notebook 또는 Python 코드가 실행되는 프로젝트 폴더
 # PROJECT_DIR = Path.cwd().resolve()
 PROJECT_DIR = Path(__file__).resolve().parent
+ZIPSAVE_DIR = Path("/root/kadap/MyDisk")
 
 # 프로젝트 내부의 데이터 및 결과 저장 폴더
 # DATA_DIR = PROJECT_DIR / "data"
@@ -973,14 +974,13 @@ print(test_metrics_df)
 print(f"\nSaved: {test_metrics_path}")
 
 
-zip_name = (
-    f"/root/kadap/MyDisk/"
+zip_name = ZIPSAVE_DIR / (
     f"lstm_h{hidden_size}_seq{sequence_length:03d}_"
     f"bs{batch_size}_ep{num_epochs}"
 )
 
 shutil.make_archive(
-    zip_name,
+    str(zip_name),
     "zip",
     root_dir="/workspace/code",
     base_dir="output"
