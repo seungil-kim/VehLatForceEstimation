@@ -111,10 +111,10 @@ y_df.columns = y_column_names
 last_scenario_name = scenario_names[-1]
 print(f"--- Last scenario: {last_scenario_name} ---")
 print("\nInput (X) data head with column names:")
-display(x_df.head())
+print(x_df.head())
 
 print("\nOutput (Y) data head with column names:")
-display(y_df.head())
+print(y_df.head())
 
 def seq_data(x, y, sequence_length):
     x_seq = []
@@ -909,7 +909,7 @@ validation_metrics_df = evaluate_scenario_list(
 )
 
 print("\nValidation metrics summary")
-display(validation_metrics_df)
+print(validation_metrics_df)
 print(f"\nSaved: {validation_metrics_path}")
 
 ## Test 시나리오 결과 출력 ##
@@ -931,5 +931,5 @@ test_metrics_df = evaluate_scenario_list(
 )
 
 print("\nTest metrics summary")
-display(test_metrics_df)
+print(test_metrics_df)
 print(f"\nSaved: {test_metrics_path}")
