@@ -311,6 +311,19 @@ def make_sequence_dataset(scenario_list, dataset_name, sequence_length):
 
     return X_out, Y_out
 
+
+sequence_length = 5
+
+x_train_seq, y_train_seq = make_sequence_dataset(train_scenarios, "Train", sequence_length)
+x_val_seq, y_val_seq = make_sequence_dataset(sorted(val_scenarios),"Validation", sequence_length)
+
+print("\n================================")
+print("Train X:", x_train_seq.shape)
+print("Train Y:", y_train_seq.shape)
+
+print("\nValidation X:", x_val_seq.shape)
+print("Validation Y:", y_val_seq.shape)
+
 run_config = {
     "sequence_length": sequence_length,
     "batch_size": batch_size,
@@ -334,20 +347,6 @@ with open(MODEL_DIR / "scalers.pkl", "wb") as f:
 
 with open(RESULT_DIR / "run_config.json", "w", encoding="utf-8") as f:
     json.dump(run_config, f, ensure_ascii=False, indent=2)
-
-
-sequence_length = 5
-
-x_train_seq, y_train_seq = make_sequence_dataset(train_scenarios, "Train", sequence_length)
-
-x_val_seq, y_val_seq = make_sequence_dataset(sorted(val_scenarios),"Validation", sequence_length)
-
-print("\n================================")
-print("Train X:", x_train_seq.shape)
-print("Train Y:", y_train_seq.shape)
-
-print("\nValidation X:", x_val_seq.shape)
-print("Validation Y:", y_val_seq.shape)
 
 ## GPU 사용 여부 확인 (Cuda)
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
