@@ -34,6 +34,10 @@ from sklearn.metrics import mean_squared_error
 import json
 import pickle
 
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+torch.backends.cudnn.deterministic = True
+
 # 현재 notebook 또는 Python 코드가 실행되는 프로젝트 폴더
 # PROJECT_DIR = Path.cwd().resolve()
 PROJECT_DIR = Path(__file__).resolve().parent
