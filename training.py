@@ -32,11 +32,14 @@ import os
 from sklearn.metrics import mean_squared_error
 
 # 현재 notebook 또는 Python 코드가 실행되는 프로젝트 폴더
-PROJECT_DIR = Path.cwd().resolve()
+# PROJECT_DIR = Path.cwd().resolve()
+PROJECT_DIR = Path(__file__).resolve().parent
 
 # 프로젝트 내부의 데이터 및 결과 저장 폴더
-DATA_DIR = PROJECT_DIR / "data"
-OUTPUT_DIR = PROJECT_DIR / "output"
+# DATA_DIR = PROJECT_DIR / "data"
+# OUTPUT_DIR = PROJECT_DIR / "output"
+DATA_DIR = Path(os.environ.get("DATA_DIR", PROJECT_DIR / "data"))
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", PROJECT_DIR / "output"))
 MODEL_DIR = OUTPUT_DIR / "models"
 RESULT_DIR = OUTPUT_DIR / "results"
 
