@@ -33,6 +33,7 @@ from sklearn.metrics import mean_squared_error
 
 import json
 import pickle
+import shutil
 
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
@@ -970,3 +971,19 @@ test_metrics_df = evaluate_scenario_list(
 print("\nTest metrics summary")
 print(test_metrics_df)
 print(f"\nSaved: {test_metrics_path}")
+
+
+zip_name = (
+    f"/root/kadap/MyDisk/"
+    f"lstm_h{hidden_size}_seq{sequence_length:03d}_"
+    f"bs{batch_size}_ep{num_epochs}"
+)
+
+shutil.make_archive(
+    zip_name,
+    "zip",
+    root_dir="/workspace/code",
+    base_dir="output"
+)
+
+print(f"Saved ZIP: {zip_name}.zip")
