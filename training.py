@@ -346,7 +346,7 @@ val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size = batch
 #기본 하이퍼 파라미터 설정
 input_size = x_train_seq.size(2)
 num_layers = 2
-hidden_size = 8
+hidden_size = 16
 
 # os.makedirs("models", exist_ok=True)
 
