@@ -324,30 +324,6 @@ print("Train Y:", y_train_seq.shape)
 print("\nValidation X:", x_val_seq.shape)
 print("Validation Y:", y_val_seq.shape)
 
-run_config = {
-    "sequence_length": sequence_length,
-    "batch_size": batch_size,
-    "hidden_size": hidden_size,
-    "num_layers": num_layers,
-    "learning_rate": 1e-3,
-    "num_epochs": num_epochs,
-    "train_scenarios": train_scenarios,
-    "validation_scenarios": val_scenarios,
-    "test_scenarios": test_scenarios,
-}
-
-with open(MODEL_DIR / "scalers.pkl", "wb") as f:
-    pickle.dump(
-        {
-            "x_scaler": x_scaler,
-            "y_scaler": y_scaler,
-        },
-        f
-    )
-
-with open(RESULT_DIR / "run_config.json", "w", encoding="utf-8") as f:
-    json.dump(run_config, f, ensure_ascii=False, indent=2)
-
 ## GPU 사용 여부 확인 (Cuda)
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print("▶device: ", device)
@@ -549,6 +525,31 @@ print("\n================================")
 print(f"Best epoch: {best_epoch}")
 print(f"Best validation loss: {best_val_loss:.6f}")
 print(f"Best model loaded: {MODEL_DIR / 'lstm_best_model.pth'}")
+
+## scaler 저장
+run_config = {
+    "sequence_length": sequence_length,
+    "batch_size": batch_size,
+    "hidden_size": hidden_size,
+    "num_layers": num_layers,
+    "learning_rate": 1e-3,
+    "num_epochs": num_epochs,
+    "train_scenarios": train_scenarios,
+    "validation_scenarios": val_scenarios,
+    "test_scenarios": test_scenarios,
+}
+
+with open(MODEL_DIR / "scalers.pkl", "wb") as f:
+    pickle.dump(
+        {
+            "x_scaler": x_scaler,
+            "y_scaler": y_scaler,
+        },
+        f
+    )
+
+with open(RESULT_DIR / "run_config.json", "w", encoding="utf-8") as f:
+    json.dump(run_config, f, ensure_ascii=False, indent=2)
 
 ## loss 그래프
 # os.makedirs("results", exist_ok=True)
