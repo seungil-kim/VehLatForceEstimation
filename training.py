@@ -376,7 +376,7 @@ model = LSTM(input_size = input_size,
 
 ## 손실함수 및 최적화 방법 정의 ##
 criterion = nn.MSELoss()
-num_epochs =401
+num_epochs = 5
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 train_loss_graph = []
