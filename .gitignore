@@ -1,6 +1,7 @@
-# data/*.mat
+data/*.mat
 # *.mat
 output/
-
+# data/
+training_old.py
 
 ~
