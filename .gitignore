@@ -1,7 +1,6 @@
-data/*.mat
-# *.mat
+data/
 output/
-# data/
 training_old.py
 
-~
+# editor backup files
+*~
