@@ -1,0 +1,609 @@
+import json
+import pickle
+import shutil
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from scipy.io import loadmat
+from sklearn.preprocessing import MinMaxScaler
+
+PROJECT_DIR = Path(__file__).resolve().parent
+ZIPSAVE_DIR = Path("/root/kadap/MyDisk")
+
+DATA_DIR = PROJECT_DIR / "data"
+OUTPUT_DIR = PROJECT_DIR / "output"
+MODEL_DIR = OUTPUT_DIR / "models"
+RESULT_DIR = OUTPUT_DIR / "results"
+DATAFILE_NAME = "LSTM_Dataset.mat"
+SPLITFILE_NAME = "LSTM_ScenarioSplit.mat"
+
+
+def ensure_dirs():
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def mat_load(data_dir=DATA_DIR, datafile_name=DATAFILE_NAME, splitfile_name=SPLITFILE_NAME):
+    core_file = data_dir / datafile_name
+    split_file = data_dir / splitfile_name
+
+    if not core_file.is_file():
+        raise FileNotFoundError(f"Dataset 파일을 찾지 못했습니다: {core_file}")
+    if not split_file.is_file():
+        raise FileNotFoundError(f"Scenario split 파일을 찾지 못했습니다: {split_file}")
+
+    core_data = loadmat(core_file)
+    dataset = core_data["LSTMDataset"]["Scenario"]
+
+    split_data = loadmat(split_file, squeeze_me=True, struct_as_record=False)
+    if "Split" not in split_data:
+        raise KeyError(f"{splitfile_name} 내부에서 'Split' 변수를 찾지 못했습니다.")
+    split_data = split_data["Split"]
+
+    scenario_names = list(dataset.dtype.names)
+    print("Loaded dataset:", dataset.shape, "scenarios:", len(scenario_names))
+
+    return dataset, split_data, scenario_names
+
+
+def get_split_field(split_struct, field_name, required=True):
+    if not hasattr(split_struct, field_name):
+        if required:
+            raise KeyError(
+                f"LSTM_ScenarioSplit.mat의 Split 구조체에 '{field_name}' 필드가 없습니다."
+            )
+        return []
+
+    raw = getattr(split_struct, field_name)
+    arr = np.asarray(raw, dtype=object).ravel()
+    out = []
+
+    for item in arr:
+        while isinstance(item, np.ndarray) and item.size == 1:
+            item = item.reshape(-1)[0]
+        if item is None:
+            continue
+        out.append(item.decode("utf-8") if isinstance(item, bytes) else str(item))
+
+    return out
+
+
+def validate_splits(split_dict, scenario_name_set):
+    for split_name, split_scenarios in split_dict.items():
+        missing_scenarios = sorted(set(split_scenarios) - scenario_name_set)
+        if missing_scenarios:
+            raise ValueError(
+                f"[{split_name}] Dataset에 없는 시나리오가 있습니다:\n"
+                + "\n".join(missing_scenarios)
+            )
+
+    scenario_to_split = {}
+    for split_name, split_scenarios in split_dict.items():
+        for scenario_name in split_scenarios:
+            if scenario_name in scenario_to_split:
+                previous_split = scenario_to_split[scenario_name]
+                raise ValueError(
+                    "Split 간 중복 시나리오가 있습니다:\n"
+                    f"{scenario_name}\n"
+                    f"- 기존 Split: {previous_split}\n"
+                    f"- 중복 Split: {split_name}"
+                )
+            scenario_to_split[scenario_name] = split_name
+
+    unassigned_scenarios = sorted(scenario_name_set - set(scenario_to_split.keys()))
+    return scenario_to_split, unassigned_scenarios
+
+
+def get_scenario_data(dataset, name):
+    scenario = dataset[0, 0][name]
+    X = scenario["X"][0, 0].astype(np.float32)
+    Y = scenario["Y"][0, 0].astype(np.float32)
+    time = scenario["Time"][0, 0]
+    return X, Y, time
+
+
+def seq_data(x, y, sequence_length):
+    x_seq = []
+    y_seq = []
+
+    for i in range(len(x) - sequence_length + 1):
+        x_seq.append(x[i : i + sequence_length])
+        y_seq.append(y[i + sequence_length - 1])
+
+    return np.array(x_seq), np.array(y_seq)
+
+
+def build_scalers(dataset, train_scenarios):
+    X_raw = []
+    Y_raw = []
+    for name in train_scenarios:
+        X, Y, _ = get_scenario_data(dataset, name)
+        X_raw.append(X)
+        Y_raw.append(Y)
+
+    X_train_raw_all = np.concatenate(X_raw, axis=0)
+    Y_train_raw_all = np.concatenate(Y_raw, axis=0)
+
+    x_scaler = MinMaxScaler().fit(X_train_raw_all)
+    y_scaler = MinMaxScaler().fit(Y_train_raw_all)
+    return x_scaler, y_scaler
+
+
+def make_sequence_dataset(dataset, scenario_list, x_scaler, y_scaler, sequence_length, dataset_name):
+    x_list = []
+    y_list = []
+
+    for name in scenario_list:
+        X, Y, _ = get_scenario_data(dataset, name)
+        X_scaled = x_scaler.transform(X)
+        Y_scaled = y_scaler.transform(Y)
+
+        x_seq, y_seq = seq_data(X_scaled, Y_scaled, sequence_length)
+        x_list.append(x_seq)
+        y_list.append(y_seq)
+
+        print(
+            f"[{dataset_name}] {name} -> "
+            f"X_seq: {x_seq.shape}, Y_seq: {y_seq.shape}"
+        )
+
+    X_out = np.concatenate(x_list, axis=0)
+    Y_out = np.concatenate(y_list, axis=0)
+    return X_out, Y_out
+
+
+def create_dataloaders(x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size):
+    train_dataset = torch.utils.data.TensorDataset(x_train_seq, y_train_seq)
+    val_dataset = torch.utils.data.TensorDataset(x_val_seq, y_val_seq)
+
+    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size)
+    return train_loader, val_loader
+
+
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, sequence_length, num_layers, device):
+        super(LSTM, self).__init__()
+        self.device = device
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size * sequence_length, 2)
+
+    def forward(self, x):
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=self.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=self.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = out.reshape(out.shape[0], -1)
+        return self.fc(out)
+
+
+def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, patience, model_path, device):
+    train_loss_graph = []
+    val_loss_graph = []
+    best_val_loss = float("inf")
+    best_epoch = -1
+    patience_counter = 0
+    last_epoch = -1
+
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss_sum = 0.0
+        train_sample_count = 0
+
+        for seq, target in train_loader:
+            seq = seq.to(device)
+            target = target.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(seq), target)
+            loss.backward()
+            optimizer.step()
+
+            batch_size_now = seq.size(0)
+            train_loss_sum += loss.item() * batch_size_now
+            train_sample_count += batch_size_now
+
+        train_loss = train_loss_sum / train_sample_count
+        train_loss_graph.append(train_loss)
+
+        model.eval()
+        val_loss_sum = 0.0
+        val_sample_count = 0
+        with torch.no_grad():
+            for seq, target in val_loader:
+                seq = seq.to(device)
+                target = target.to(device)
+                loss = criterion(model(seq), target)
+                batch_size_now = seq.size(0)
+                val_loss_sum += loss.item() * batch_size_now
+                val_sample_count += batch_size_now
+
+        val_loss = val_loss_sum / val_sample_count
+        val_loss_graph.append(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            patience_counter = 0
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_loss_graph": train_loss_graph.copy(),
+                "val_loss_graph": val_loss_graph.copy(),
+            }, model_path)
+        else:
+            patience_counter += 1
+
+        if epoch % 10 == 0 or epoch == num_epochs - 1:
+            print(
+                f"[Epoch {epoch:03d}] Train Loss: {train_loss:.6f} | "
+                f"Val Loss: {val_loss:.6f} | Best Val Loss: {best_val_loss:.6f} | "
+                f"Patience: {patience_counter}/{patience}"
+            )
+
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
+            last_epoch = epoch
+            break
+
+        last_epoch = epoch
+
+    torch.save({
+        "epoch": last_epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_loss": train_loss_graph[-1],
+        "val_loss": val_loss_graph[-1],
+    }, MODEL_DIR / "lstm_last_model.pth")
+
+    return train_loss_graph, val_loss_graph, best_epoch, best_val_loss
+
+
+def save_training_artifacts(x_scaler, y_scaler, run_config):
+    with open(MODEL_DIR / "scalers.pkl", "wb") as f:
+        pickle.dump({"x_scaler": x_scaler, "y_scaler": y_scaler}, f)
+
+    with open(RESULT_DIR / "run_config.json", "w", encoding="utf-8") as f:
+        json.dump(run_config, f, ensure_ascii=False, indent=2)
+
+
+def plot_loss(train_loss_graph, val_loss_graph, best_epoch):
+    epochs = range(1, len(train_loss_graph) + 1)
+
+    plt.figure(figsize=(9, 5))
+    plt.plot(epochs, train_loss_graph, label="Train Loss")
+    plt.plot(epochs, val_loss_graph, label="Validation Loss")
+    plt.axvline(best_epoch + 1, linestyle="--", label=f"Best Epoch = {best_epoch + 1}")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.title("LSTM Training and Validation Loss")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(RESULT_DIR / "Loss.png", dpi=300)
+
+    plt.figure(figsize=(9, 5))
+    plt.semilogy(train_loss_graph, label="Train Loss")
+    plt.semilogy(val_loss_graph, label="Validation Loss")
+    plt.axvline(best_epoch, linestyle="--", label=f"Best Epoch = {best_epoch}")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss (log scale)")
+    plt.title("LSTM Training and Validation Loss")
+    plt.grid(True, which="both")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(RESULT_DIR / "Loss_log.png", dpi=300)
+
+
+def get_time_array(time_raw):
+    time_data = time_raw
+    while isinstance(time_data, np.ndarray) and time_data.dtype == object and time_data.size == 1:
+        time_data = time_data.flat[0]
+    return np.asarray(time_data, dtype=np.float32).squeeze()
+
+
+def predict_scenario(dataset, scenario_name, model, x_scaler, y_scaler, sequence_length, device):
+    scenario = dataset[0, 0][scenario_name]
+    X_raw = scenario["X"][0, 0].astype(np.float32)
+    Y_raw = scenario["Y"][0, 0].astype(np.float32)
+    time = get_time_array(scenario["Time"])
+
+    try:
+        ukf_raw = scenario["UKF"][0, 0].astype(np.float32)
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise KeyError(
+            f"{scenario_name}: Comparison.UKF 데이터를 읽을 수 없습니다. "
+            "MATLAB Dataset에 Comparison.UKF 필드가 있는지 확인하세요."
+        ) from exc
+
+    if X_raw.ndim != 2 or Y_raw.ndim != 2 or ukf_raw.ndim != 2:
+        raise ValueError(f"{scenario_name}: X, Y, UKF 데이터는 모두 2차원 행렬이어야 합니다.")
+    if Y_raw.shape[1] != 2 or ukf_raw.shape[1] != 2:
+        raise ValueError(f"{scenario_name}: Y와 UKF는 [Fyf, Fyr] 형태의 N×2 행렬이어야 합니다.")
+    if not (len(X_raw) == len(Y_raw) == len(ukf_raw) == len(time)):
+        raise ValueError(
+            f"{scenario_name}: X, Y, UKF, Time 길이가 일치하지 않습니다. "
+            f"X={len(X_raw)}, Y={len(Y_raw)}, UKF={len(ukf_raw)}, Time={len(time)}"
+        )
+    if len(X_raw) < sequence_length:
+        raise ValueError(f"{scenario_name}: sequence_length={sequence_length}보다 데이터 길이가 짧습니다.")
+
+    X_scaled = x_scaler.transform(X_raw)
+    x_seq, _ = seq_data(X_scaled, Y_raw, sequence_length)
+    x_tensor = torch.as_tensor(x_seq.astype(np.float32), device=device)
+
+    model.eval()
+    with torch.no_grad():
+        pred_scaled = model(x_tensor).cpu().numpy()
+
+    pred_force = y_scaler.inverse_transform(pred_scaled)
+    start_idx = sequence_length - 1
+    time_aligned = time[start_idx:]
+    true_force = Y_raw[start_idx:]
+    ukf_force = ukf_raw[start_idx:]
+
+    if not (len(time_aligned) == len(true_force) == len(pred_force) == len(ukf_force)):
+        raise RuntimeError(f"{scenario_name}: 예측값/정답/UKF/시간축 길이가 일치하지 않습니다.")
+
+    return time_aligned, true_force, pred_force, ukf_force
+
+
+def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, model, x_scaler, y_scaler, sequence_length, device):
+    metric_rows = []
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        f.write("Lateral Force Estimation Metrics\n")
+        f.write(f"Split: {split_name}\n")
+        f.write("=" * 70 + "\n")
+
+    for scenario_name in scenario_list:
+        time_eval, true_force, pred_force, ukf_force = predict_scenario(
+            dataset=dataset,
+            scenario_name=scenario_name,
+            model=model,
+            x_scaler=x_scaler,
+            y_scaler=y_scaler,
+            sequence_length=sequence_length,
+            device=device,
+        )
+
+        lstm_error_front = pred_force[:, 0] - true_force[:, 0]
+        lstm_error_rear = pred_force[:, 1] - true_force[:, 1]
+        ukf_error_front = ukf_force[:, 0] - true_force[:, 0]
+        ukf_error_rear = ukf_force[:, 1] - true_force[:, 1]
+
+        lstm_rmse_front = np.sqrt(np.mean(lstm_error_front ** 2))
+        lstm_rmse_rear = np.sqrt(np.mean(lstm_error_rear ** 2))
+        lstm_mae_front = np.mean(np.abs(lstm_error_front))
+        lstm_mae_rear = np.mean(np.abs(lstm_error_rear))
+        lstm_max_error_front = np.max(np.abs(lstm_error_front))
+        lstm_max_error_rear = np.max(np.abs(lstm_error_rear))
+
+        ukf_rmse_front = np.sqrt(np.mean(ukf_error_front ** 2))
+        ukf_rmse_rear = np.sqrt(np.mean(ukf_error_rear ** 2))
+        ukf_mae_front = np.mean(np.abs(ukf_error_front))
+        ukf_mae_rear = np.mean(np.abs(ukf_error_rear))
+        ukf_max_error_front = np.max(np.abs(ukf_error_front))
+        ukf_max_error_rear = np.max(np.abs(ukf_error_rear))
+
+        metric_rows.append({
+            "Scenario": scenario_name,
+            "LSTM_Front_RMSE_N": lstm_rmse_front,
+            "LSTM_Front_MAE_N": lstm_mae_front,
+            "LSTM_Front_MaxError_N": lstm_max_error_front,
+            "LSTM_Rear_RMSE_N": lstm_rmse_rear,
+            "LSTM_Rear_MAE_N": lstm_mae_rear,
+            "LSTM_Rear_MaxError_N": lstm_max_error_rear,
+            "UKF_Front_RMSE_N": ukf_rmse_front,
+            "UKF_Front_MAE_N": ukf_mae_front,
+            "UKF_Front_MaxError_N": ukf_max_error_front,
+            "UKF_Rear_RMSE_N": ukf_rmse_rear,
+            "UKF_Rear_MAE_N": ukf_mae_rear,
+            "UKF_Rear_MaxError_N": ukf_max_error_rear,
+        })
+
+        with open(metrics_path, "a", encoding="utf-8") as f:
+            f.write(f"\nScenario: {scenario_name}\n")
+            f.write("-" * 70 + "\n")
+            f.write("[LSTM]\n")
+            f.write(f"Front RMSE      : {lstm_rmse_front:.2f} N\n")
+            f.write(f"Front MAE       : {lstm_mae_front:.2f} N\n")
+            f.write(f"Front Max Error : {lstm_max_error_front:.2f} N\n")
+            f.write(f"Rear RMSE       : {lstm_rmse_rear:.2f} N\n")
+            f.write(f"Rear MAE        : {lstm_mae_rear:.2f} N\n")
+            f.write(f"Rear Max Error  : {lstm_max_error_rear:.2f} N\n")
+            f.write("\n[UKF]\n")
+            f.write(f"Front RMSE      : {ukf_rmse_front:.2f} N\n")
+            f.write(f"Front MAE       : {ukf_mae_front:.2f} N\n")
+            f.write(f"Front Max Error : {ukf_max_error_front:.2f} N\n")
+            f.write(f"Rear RMSE       : {ukf_rmse_rear:.2f} N\n")
+            f.write(f"Rear MAE        : {ukf_mae_rear:.2f} N\n")
+            f.write(f"Rear Max Error  : {ukf_max_error_rear:.2f} N\n")
+
+        plot_scenario_results(
+            split_name,
+            scenario_name,
+            time_eval,
+            true_force,
+            pred_force,
+            ukf_force,
+        )
+
+    metrics_df = pd.DataFrame(metric_rows)
+    if not metrics_df.empty:
+        mean_columns = [
+            "LSTM_Front_RMSE_N",
+            "LSTM_Front_MAE_N",
+            "LSTM_Rear_RMSE_N",
+            "LSTM_Rear_MAE_N",
+            "UKF_Front_RMSE_N",
+            "UKF_Front_MAE_N",
+            "UKF_Rear_RMSE_N",
+            "UKF_Rear_MAE_N",
+        ]
+        print(f"\n[{split_name}] Mean metrics")
+        print(metrics_df[mean_columns].mean())
+
+    return metrics_df
+
+
+def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred_force, ukf_force):
+    plt.figure(figsize=(10, 4))
+    plt.plot(time_eval, true_force[:, 0], label="Ground Truth")
+    plt.plot(time_eval, ukf_force[:, 0], label="UKF Estimation")
+    plt.plot(time_eval, pred_force[:, 0], label="LSTM Prediction")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Front Lateral Force [N]")
+    plt.title(f"{split_name} | {scenario_name} - Front Lateral Force")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_front_lateral_force.png", dpi=300)
+    plt.show()
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(time_eval, true_force[:, 1], label="Ground Truth")
+    plt.plot(time_eval, ukf_force[:, 1], label="UKF Estimation")
+    plt.plot(time_eval, pred_force[:, 1], label="LSTM Prediction")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Rear Lateral Force [N]")
+    plt.title(f"{split_name} | {scenario_name} - Rear Lateral Force")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_rear_lateral_force.png", dpi=300)
+    plt.show()
+
+
+def zip_output(sequence_length, batch_size, num_epochs, hidden_size):
+    zip_name = ZIPSAVE_DIR / (
+        f"lstm_h{hidden_size}_seq{sequence_length:03d}_"
+        f"bs{batch_size}_ep{num_epochs}"
+    )
+    shutil.make_archive(str(zip_name), "zip", root_dir=str(OUTPUT_DIR), base_dir=".")
+    print(f"Saved ZIP: {zip_name}.zip")
+
+
+def main():
+    ensure_dirs()
+    dataset, split_data, scenario_names = mat_load()
+    scenario_name_set = set(scenario_names)
+
+    train_scenarios = get_split_field(split_data, "Train")
+    val_scenarios = get_split_field(split_data, "Validation")
+    test_scenarios = get_split_field(split_data, "Test")
+
+    split_dict = {
+        "Train": train_scenarios,
+        "Validation": val_scenarios,
+        "Test": test_scenarios,
+    }
+    _, unassigned_scenarios = validate_splits(split_dict, scenario_name_set)
+
+    print("Train scenarios:", len(train_scenarios))
+    print("Validation scenarios:", len(val_scenarios))
+    print("Test scenarios:", len(test_scenarios))
+    if unassigned_scenarios:
+        print("Unassigned scenarios:", unassigned_scenarios)
+
+    x_scaler, y_scaler = build_scalers(dataset, train_scenarios)
+    sequence_length = 50
+    x_train_seq, y_train_seq = make_sequence_dataset(dataset, train_scenarios, x_scaler, y_scaler, sequence_length, "Train")
+    x_val_seq, y_val_seq = make_sequence_dataset(dataset, sorted(val_scenarios), x_scaler, y_scaler, sequence_length, "Validation")
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print("device:", device)
+
+    x_train_seq = torch.as_tensor(x_train_seq, dtype=torch.float32, device=device)
+    y_train_seq = torch.as_tensor(y_train_seq, dtype=torch.float32, device=device)
+    x_val_seq = torch.as_tensor(x_val_seq, dtype=torch.float32, device=device)
+    y_val_seq = torch.as_tensor(y_val_seq, dtype=torch.float32, device=device)
+
+    train_loader, val_loader = create_dataloaders(x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size=128)
+
+    model = LSTM(
+        input_size=x_train_seq.size(2),
+        hidden_size=16,
+        sequence_length=sequence_length,
+        num_layers=2,
+        device=device,
+    ).to(device)
+
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    num_epochs = 401
+    early_stopping_patience = 20
+
+    train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
+        model,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer,
+        num_epochs,
+        early_stopping_patience,
+        MODEL_DIR / "lstm_best_model.pth",
+        device,
+    )
+
+    print(f"Best epoch: {best_epoch}, best validation loss: {best_val_loss:.6f}")
+    save_training_artifacts(
+        x_scaler,
+        y_scaler,
+        {
+            "sequence_length": sequence_length,
+            "batch_size": 128,
+            "hidden_size": 16,
+            "num_layers": 2,
+            "learning_rate": 1e-3,
+            "num_epochs": num_epochs,
+            "train_scenarios": train_scenarios,
+            "validation_scenarios": val_scenarios,
+            "test_scenarios": test_scenarios,
+        },
+    )
+    plot_loss(train_loss_graph, val_loss_graph, best_epoch)
+
+    best_checkpoint = torch.load(MODEL_DIR / "lstm_best_model.pth", map_location=device)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+    model.eval()
+
+    validation_metrics_df = evaluate_scenario_list(
+        scenario_list=val_scenarios,
+        split_name="Validation",
+        metrics_path=RESULT_DIR / "validation_metrics.txt",
+        dataset=dataset,
+        model=model,
+        x_scaler=x_scaler,
+        y_scaler=y_scaler,
+        sequence_length=sequence_length,
+        device=device,
+    )
+    print("Validation metrics summary")
+    print(validation_metrics_df)
+
+    test_metrics_df = evaluate_scenario_list(
+        scenario_list=test_scenarios,
+        split_name="Test",
+        metrics_path=RESULT_DIR / "test_metrics.txt",
+        dataset=dataset,
+        model=model,
+        x_scaler=x_scaler,
+        y_scaler=y_scaler,
+        sequence_length=sequence_length,
+        device=device,
+    )
+    print("Test metrics summary")
+    print(test_metrics_df)
+
+    zip_output(sequence_length, batch_size=128, num_epochs=num_epochs, hidden_size=16)
+
+
+if __name__ == "__main__":
+    main()
