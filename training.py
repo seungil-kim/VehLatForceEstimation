@@ -1,6 +1,9 @@
 import json
 import pickle
+import re
 import shutil
+import os
+import random
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -12,7 +15,7 @@ import torch.optim as optim
 from scipy.io import loadmat, savemat
 from sklearn.preprocessing import MinMaxScaler
 
-
+SEED = 42
 LOCAL_RUN = False  # True: 로컬 환경(그래프 창 표시), False: 서버 환경(창 비활성화)
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -28,6 +31,18 @@ SPLITFILE_NAME = "LSTM_ScenarioSplit.mat"
 RESULTS_MAT_NAME = "LSTM_Results.mat"
 LOSS_MAT_NAME = "Loss_Curve.mat"
 
+def set_seed(seed=SEED):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # CUDA >=10.2 결정론적 matmul/RNN을 위해 필요
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 def mat_load(data_dir=DATA_DIR, datafile_name=DATAFILE_NAME, splitfile_name=SPLITFILE_NAME):
     core_file = data_dir / datafile_name
@@ -131,6 +146,15 @@ def seq_data(x, y, sequence_length):
     return np.array(x_seq), np.array(y_seq)
 
 
+def get_scenario_category(scenario_name):
+    # 데이터 불균형 완화를 위한 카테고리 분류.
+    # 시나리오 이름에서 mu/v 조건과 Lturn/Rturn 접미사를 떼어내면
+    # DLC, SLC, ISO_Steady_State_Circle, Sine_Sweep_Steer 등 조작 유형만 남는다.
+    category = re.split(r"_mu\d", scenario_name)[0]
+    category = re.sub(r"_(Lturn|Rturn)$", "", category)
+    return category
+
+
 def build_scalers(dataset, train_scenarios):
     X_raw = []
     Y_raw = []
@@ -150,6 +174,7 @@ def build_scalers(dataset, train_scenarios):
 def make_sequence_dataset(dataset, scenario_list, x_scaler, y_scaler, sequence_length, dataset_name):
     x_list = []
     y_list = []
+    sample_counts = {}  # scenario_name -> 생성된 시퀀스 샘플 수 (카테고리 가중치 계산용)
 
     for name in scenario_list:
         X, Y, _ = get_scenario_data(dataset, name)
@@ -159,6 +184,7 @@ def make_sequence_dataset(dataset, scenario_list, x_scaler, y_scaler, sequence_l
         x_seq, y_seq = seq_data(X_scaled, Y_scaled, sequence_length)
         x_list.append(x_seq)
         y_list.append(y_seq)
+        sample_counts[name] = len(x_seq)
 
         print(
             f"[{dataset_name}] {name} -> "
@@ -167,14 +193,41 @@ def make_sequence_dataset(dataset, scenario_list, x_scaler, y_scaler, sequence_l
 
     X_out = np.concatenate(x_list, axis=0)
     Y_out = np.concatenate(y_list, axis=0)
-    return X_out, Y_out
+    return X_out, Y_out, sample_counts
 
 
-def create_dataloaders(x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size):
+def build_category_sample_weights(scenario_list, sample_counts):
+    # 목표: 매 epoch 배치가 "카테고리(조작 유형)"별로 균등하게 뽑히도록
+    # 샘플별 가중치를 부여한다. 가중치 = 1 / (카테고리 내 시나리오 수 * 해당 시나리오 샘플 수)
+    # -> 카테고리 간 균등 + 카테고리 내 시나리오 간 균등을 동시에 달성.
+    categories = {name: get_scenario_category(name) for name in scenario_list}
+    scenarios_per_category = {}
+    for name, category in categories.items():
+        scenarios_per_category[category] = scenarios_per_category.get(category, 0) + 1
+
+    weights = []
+    for name in scenario_list:
+        category = categories[name]
+        n_scenarios_in_category = scenarios_per_category[category]
+        n_samples_in_scenario = sample_counts[name]
+        weight = 1.0 / (n_scenarios_in_category * n_samples_in_scenario)
+        weights.extend([weight] * n_samples_in_scenario)
+
+    return torch.as_tensor(weights, dtype=torch.double)
+
+
+def create_dataloaders(x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size, train_sample_weights=None):
     train_dataset = torch.utils.data.TensorDataset(x_train_seq, y_train_seq)
     val_dataset = torch.utils.data.TensorDataset(x_val_seq, y_val_seq)
 
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    if train_sample_weights is not None:
+        sampler = torch.utils.data.WeightedRandomSampler(
+            train_sample_weights, num_samples=len(train_sample_weights), replacement=True
+        )
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, sampler=sampler)
+    else:
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size)
     return train_loader, val_loader
 
@@ -412,6 +465,7 @@ def evaluate_scenario_list(
 
         metric_rows.append({
             "Scenario": scenario_name,
+            "Category": get_scenario_category(scenario_name),
             "LSTM_Front_RMSE_N": lstm_rmse_front,
             "LSTM_Front_MAE_N": lstm_mae_front,
             "LSTM_Front_MaxError_N": lstm_max_error_front,
@@ -455,8 +509,10 @@ def evaluate_scenario_list(
             "LSTM_Rear_RMSE_N",
             "LSTM_Rear_MAE_N",
         ]
-        print(f"\n[{split_name}] Mean metrics")
+        print(f"\n[{split_name}] Mean metrics (overall)")
         print(metrics_df[mean_columns].mean())
+        print(f"\n[{split_name}] Mean metrics by category")
+        print(metrics_df.groupby("Category")[mean_columns].mean())
 
     return metrics_df
 
@@ -522,6 +578,7 @@ def zip_output(sequence_length, batch_size, num_epochs, hidden_size):
 
 
 def main():
+    set_seed(SEED)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     dataset, split_data, scenario_names = mat_load()
@@ -546,8 +603,14 @@ def main():
 
     x_scaler, y_scaler = build_scalers(dataset, train_scenarios)
     sequence_length = 50
-    x_train_seq, y_train_seq = make_sequence_dataset(dataset, train_scenarios, x_scaler, y_scaler, sequence_length, "Train")
-    x_val_seq, y_val_seq = make_sequence_dataset(dataset, sorted(val_scenarios), x_scaler, y_scaler, sequence_length, "Validation")
+    x_train_seq, y_train_seq, train_sample_counts = make_sequence_dataset(
+        dataset, train_scenarios, x_scaler, y_scaler, sequence_length, "Train"
+    )
+    x_val_seq, y_val_seq, _ = make_sequence_dataset(
+        dataset, sorted(val_scenarios), x_scaler, y_scaler, sequence_length, "Validation"
+    )
+
+    train_sample_weights = build_category_sample_weights(train_scenarios, train_sample_counts)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("device:", device)
@@ -557,7 +620,9 @@ def main():
     x_val_seq = torch.as_tensor(x_val_seq, dtype=torch.float32, device=device)
     y_val_seq = torch.as_tensor(y_val_seq, dtype=torch.float32, device=device)
 
-    train_loader, val_loader = create_dataloaders(x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size=128)
+    train_loader, val_loader = create_dataloaders(
+        x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size=128, train_sample_weights=train_sample_weights
+    )
 
     model = LSTM(
         input_size=x_train_seq.size(2),
@@ -569,7 +634,7 @@ def main():
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    num_epochs = 30
+    num_epochs = 5
     early_stopping_patience = 20
 
     train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
