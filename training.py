@@ -17,6 +17,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 SEED = 42
 LOCAL_RUN = False  # True: 로컬 환경(그래프 창 표시), False: 서버 환경(창 비활성화)
+EARLYSTOPPING = False
 
 PROJECT_DIR = Path(__file__).resolve().parent
 # ZIPSAVE_DIR = Path("/root/kadap/MyDisk")
@@ -315,7 +316,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
                 f"Patience: {patience_counter}/{patience}"
             )
 
-        if patience_counter >= patience:
+        if EARLYSTOPPING and patience_counter >= patience:
             print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
             last_epoch = epoch
             break
