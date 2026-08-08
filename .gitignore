@@ -1,6 +1,7 @@
 data/*
 !data/.gitkeep
-output/
+output/*
+!output/.gitkeep
 _old/
 __pycache__/
 *.pyc
