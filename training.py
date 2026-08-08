@@ -9,11 +9,14 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from scipy.io import loadmat
+from scipy.io import loadmat, savemat
 from sklearn.preprocessing import MinMaxScaler
 
 
+LOCAL_RUN = False  # True: 로컬 환경(그래프 창 표시), False: 서버 환경(창 비활성화)
+
 PROJECT_DIR = Path(__file__).resolve().parent
+# ZIPSAVE_DIR = Path("/root/kadap/MyDisk")
 ZIPSAVE_DIR = Path("/root/kadap/MyDisk")
 
 DATA_DIR = PROJECT_DIR / "data"
@@ -22,11 +25,8 @@ MODEL_DIR = OUTPUT_DIR / "models"
 RESULT_DIR = OUTPUT_DIR / "results"
 DATAFILE_NAME = "LSTM_Dataset.mat"
 SPLITFILE_NAME = "LSTM_ScenarioSplit.mat"
-
-
-def ensure_dirs():
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_MAT_NAME = "LSTM_Results.mat"
+LOSS_MAT_NAME = "Loss_Curve.mat"
 
 
 def mat_load(data_dir=DATA_DIR, datafile_name=DATAFILE_NAME, splitfile_name=SPLITFILE_NAME):
@@ -46,7 +46,8 @@ def mat_load(data_dir=DATA_DIR, datafile_name=DATAFILE_NAME, splitfile_name=SPLI
         raise KeyError(f"{splitfile_name} 내부에서 'Split' 변수를 찾지 못했습니다.")
     split_data = split_data["Split"]
 
-    scenario_names = list(dataset.dtype.names)
+    # dataset은 (1,1) object 배열이므로 [0, 0]으로 언랩해야 시나리오 이름(dtype.names)을 얻을 수 있다.
+    scenario_names = list(dataset[0, 0].dtype.names)
     print("Loaded dataset:", dataset.shape, "scenarios:", len(scenario_names))
 
     return dataset, split_data, scenario_names
@@ -100,11 +101,22 @@ def validate_splits(split_dict, scenario_name_set):
     return scenario_to_split, unassigned_scenarios
 
 
+def unwrap_mat_struct(value):
+    # scipy.io.loadmat은 MATLAB 중첩 struct를 object 배열로 감싸는데,
+    # 감싸는 깊이가 시나리오마다(생성 스크립트/버전에 따라) 다를 수 있어
+    # object dtype이면서 원소가 1개인 동안 계속 벗겨낸다.
+    while isinstance(value, np.ndarray) and value.dtype == object and value.size == 1:
+        value = value.reshape(-1)[0]
+    return value
+
+
 def get_scenario_data(dataset, name):
-    scenario = dataset[0, 0][name]
-    X = scenario["X"][0, 0].astype(np.float32)
-    Y = scenario["Y"][0, 0].astype(np.float32)
-    time = scenario["Time"][0, 0]
+    # 새 데이터 구조: Scenario.<name>.{Meta, Time, LSTM.{X, Y, ...}}
+    scenario = unwrap_mat_struct(dataset[0, 0][name])
+    lstm_block = unwrap_mat_struct(scenario["LSTM"])
+    X = unwrap_mat_struct(lstm_block["X"]).astype(np.float32)
+    Y = unwrap_mat_struct(lstm_block["Y"]).astype(np.float32)
+    time = unwrap_mat_struct(scenario["Time"])
     return X, Y, time
 
 
@@ -303,6 +315,20 @@ def plot_loss(train_loss_graph, val_loss_graph, best_epoch):
     plt.savefig(RESULT_DIR / "Loss_log.png", dpi=300)
 
 
+def save_loss_curve_mat(train_loss_graph, val_loss_graph, best_epoch, best_val_loss, output_path):
+    epoch = np.arange(1, len(train_loss_graph) + 1, dtype=np.float64).reshape(-1, 1)
+    savemat(output_path, {
+        "LossCurve": {
+            "Epoch": epoch,
+            "TrainLoss": np.asarray(train_loss_graph, dtype=np.float64).reshape(-1, 1),
+            "ValLoss": np.asarray(val_loss_graph, dtype=np.float64).reshape(-1, 1),
+            "BestEpoch": best_epoch + 1,
+            "BestValLoss": best_val_loss,
+        }
+    })
+    print(f"Saved loss curve data: {output_path}")
+
+
 def get_time_array(time_raw):
     time_data = time_raw
     while isinstance(time_data, np.ndarray) and time_data.dtype == object and time_data.size == 1:
@@ -311,27 +337,17 @@ def get_time_array(time_raw):
 
 
 def predict_scenario(dataset, scenario_name, model, x_scaler, y_scaler, sequence_length, device):
-    scenario = dataset[0, 0][scenario_name]
-    X_raw = scenario["X"][0, 0].astype(np.float32)
-    Y_raw = scenario["Y"][0, 0].astype(np.float32)
-    time = get_time_array(scenario["Time"])
+    X_raw, Y_raw, time_raw = get_scenario_data(dataset, scenario_name)
+    time = get_time_array(time_raw)
 
-    try:
-        ukf_raw = scenario["UKF"][0, 0].astype(np.float32)
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise KeyError(
-            f"{scenario_name}: Comparison.UKF 데이터를 읽을 수 없습니다. "
-            "MATLAB Dataset에 Comparison.UKF 필드가 있는지 확인하세요."
-        ) from exc
-
-    if X_raw.ndim != 2 or Y_raw.ndim != 2 or ukf_raw.ndim != 2:
-        raise ValueError(f"{scenario_name}: X, Y, UKF 데이터는 모두 2차원 행렬이어야 합니다.")
-    if Y_raw.shape[1] != 2 or ukf_raw.shape[1] != 2:
-        raise ValueError(f"{scenario_name}: Y와 UKF는 [Fyf, Fyr] 형태의 N×2 행렬이어야 합니다.")
-    if not (len(X_raw) == len(Y_raw) == len(ukf_raw) == len(time)):
+    if X_raw.ndim != 2 or Y_raw.ndim != 2:
+        raise ValueError(f"{scenario_name}: X, Y 데이터는 모두 2차원 행렬이어야 합니다.")
+    if Y_raw.shape[1] != 2:
+        raise ValueError(f"{scenario_name}: Y는 [Fyf, Fyr] 형태의 N×2 행렬이어야 합니다.")
+    if not (len(X_raw) == len(Y_raw) == len(time)):
         raise ValueError(
-            f"{scenario_name}: X, Y, UKF, Time 길이가 일치하지 않습니다. "
-            f"X={len(X_raw)}, Y={len(Y_raw)}, UKF={len(ukf_raw)}, Time={len(time)}"
+            f"{scenario_name}: X, Y, Time 길이가 일치하지 않습니다. "
+            f"X={len(X_raw)}, Y={len(Y_raw)}, Time={len(time)}"
         )
     if len(X_raw) < sequence_length:
         raise ValueError(f"{scenario_name}: sequence_length={sequence_length}보다 데이터 길이가 짧습니다.")
@@ -348,23 +364,33 @@ def predict_scenario(dataset, scenario_name, model, x_scaler, y_scaler, sequence
     start_idx = sequence_length - 1
     time_aligned = time[start_idx:]
     true_force = Y_raw[start_idx:]
-    ukf_force = ukf_raw[start_idx:]
 
-    if not (len(time_aligned) == len(true_force) == len(pred_force) == len(ukf_force)):
-        raise RuntimeError(f"{scenario_name}: 예측값/정답/UKF/시간축 길이가 일치하지 않습니다.")
+    if not (len(time_aligned) == len(true_force) == len(pred_force)):
+        raise RuntimeError(f"{scenario_name}: 예측값/정답/시간축 길이가 일치하지 않습니다.")
 
-    return time_aligned, true_force, pred_force, ukf_force
+    return time_aligned, true_force, pred_force
 
 
-def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, model, x_scaler, y_scaler, sequence_length, device):
+def evaluate_scenario_list(
+    scenario_list,
+    split_name,
+    metrics_path,
+    dataset,
+    model,
+    x_scaler,
+    y_scaler,
+    sequence_length,
+    device,
+    results_accumulator=None,
+):
     metric_rows = []
     with open(metrics_path, "w", encoding="utf-8") as f:
-        f.write("Lateral Force Estimation Metrics\n")
+        f.write("Lateral Force Estimation Metrics (LSTM vs Reference)\n")
         f.write(f"Split: {split_name}\n")
         f.write("=" * 70 + "\n")
 
     for scenario_name in scenario_list:
-        time_eval, true_force, pred_force, ukf_force = predict_scenario(
+        time_eval, true_force, pred_force = predict_scenario(
             dataset=dataset,
             scenario_name=scenario_name,
             model=model,
@@ -376,8 +402,6 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
 
         lstm_error_front = pred_force[:, 0] - true_force[:, 0]
         lstm_error_rear = pred_force[:, 1] - true_force[:, 1]
-        ukf_error_front = ukf_force[:, 0] - true_force[:, 0]
-        ukf_error_rear = ukf_force[:, 1] - true_force[:, 1]
 
         lstm_rmse_front = np.sqrt(np.mean(lstm_error_front ** 2))
         lstm_rmse_rear = np.sqrt(np.mean(lstm_error_rear ** 2))
@@ -385,13 +409,6 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
         lstm_mae_rear = np.mean(np.abs(lstm_error_rear))
         lstm_max_error_front = np.max(np.abs(lstm_error_front))
         lstm_max_error_rear = np.max(np.abs(lstm_error_rear))
-
-        ukf_rmse_front = np.sqrt(np.mean(ukf_error_front ** 2))
-        ukf_rmse_rear = np.sqrt(np.mean(ukf_error_rear ** 2))
-        ukf_mae_front = np.mean(np.abs(ukf_error_front))
-        ukf_mae_rear = np.mean(np.abs(ukf_error_rear))
-        ukf_max_error_front = np.max(np.abs(ukf_error_front))
-        ukf_max_error_rear = np.max(np.abs(ukf_error_rear))
 
         metric_rows.append({
             "Scenario": scenario_name,
@@ -401,31 +418,18 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
             "LSTM_Rear_RMSE_N": lstm_rmse_rear,
             "LSTM_Rear_MAE_N": lstm_mae_rear,
             "LSTM_Rear_MaxError_N": lstm_max_error_rear,
-            "UKF_Front_RMSE_N": ukf_rmse_front,
-            "UKF_Front_MAE_N": ukf_mae_front,
-            "UKF_Front_MaxError_N": ukf_max_error_front,
-            "UKF_Rear_RMSE_N": ukf_rmse_rear,
-            "UKF_Rear_MAE_N": ukf_mae_rear,
-            "UKF_Rear_MaxError_N": ukf_max_error_rear,
         })
 
         with open(metrics_path, "a", encoding="utf-8") as f:
             f.write(f"\nScenario: {scenario_name}\n")
             f.write("-" * 70 + "\n")
-            f.write("[LSTM]\n")
+            f.write("[LSTM vs Reference]\n")
             f.write(f"Front RMSE      : {lstm_rmse_front:.2f} N\n")
             f.write(f"Front MAE       : {lstm_mae_front:.2f} N\n")
             f.write(f"Front Max Error : {lstm_max_error_front:.2f} N\n")
             f.write(f"Rear RMSE       : {lstm_rmse_rear:.2f} N\n")
             f.write(f"Rear MAE        : {lstm_mae_rear:.2f} N\n")
             f.write(f"Rear Max Error  : {lstm_max_error_rear:.2f} N\n")
-            f.write("\n[UKF]\n")
-            f.write(f"Front RMSE      : {ukf_rmse_front:.2f} N\n")
-            f.write(f"Front MAE       : {ukf_mae_front:.2f} N\n")
-            f.write(f"Front Max Error : {ukf_max_error_front:.2f} N\n")
-            f.write(f"Rear RMSE       : {ukf_rmse_rear:.2f} N\n")
-            f.write(f"Rear MAE        : {ukf_mae_rear:.2f} N\n")
-            f.write(f"Rear Max Error  : {ukf_max_error_rear:.2f} N\n")
 
         plot_scenario_results(
             split_name,
@@ -433,8 +437,15 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
             time_eval,
             true_force,
             pred_force,
-            ukf_force,
         )
+
+        if results_accumulator is not None:
+            results_accumulator[scenario_name] = {
+                "Split": split_name,
+                "Time": np.asarray(time_eval, dtype=np.float64).reshape(-1, 1),
+                "Reference": np.asarray(true_force, dtype=np.float64),
+                "LSTM_Pred": np.asarray(pred_force, dtype=np.float64),
+            }
 
     metrics_df = pd.DataFrame(metric_rows)
     if not metrics_df.empty:
@@ -443,10 +454,6 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
             "LSTM_Front_MAE_N",
             "LSTM_Rear_RMSE_N",
             "LSTM_Rear_MAE_N",
-            "UKF_Front_RMSE_N",
-            "UKF_Front_MAE_N",
-            "UKF_Rear_RMSE_N",
-            "UKF_Rear_MAE_N",
         ]
         print(f"\n[{split_name}] Mean metrics")
         print(metrics_df[mean_columns].mean())
@@ -454,10 +461,9 @@ def evaluate_scenario_list(scenario_list, split_name, metrics_path, dataset, mod
     return metrics_df
 
 
-def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred_force, ukf_force):
+def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred_force):
     plt.figure(figsize=(10, 4))
-    plt.plot(time_eval, true_force[:, 0], label="Ground Truth")
-    plt.plot(time_eval, ukf_force[:, 0], label="UKF Estimation")
+    plt.plot(time_eval, true_force[:, 0], label="Reference (Ground Truth)")
     plt.plot(time_eval, pred_force[:, 0], label="LSTM Prediction")
     plt.xlabel("Time [s]")
     plt.ylabel("Front Lateral Force [N]")
@@ -466,11 +472,11 @@ def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred
     plt.legend()
     plt.tight_layout()
     plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_front_lateral_force.png", dpi=300)
-    plt.show()
+    if LOCAL_RUN:
+        plt.show()
 
     plt.figure(figsize=(10, 4))
-    plt.plot(time_eval, true_force[:, 1], label="Ground Truth")
-    plt.plot(time_eval, ukf_force[:, 1], label="UKF Estimation")
+    plt.plot(time_eval, true_force[:, 1], label="Reference (Ground Truth)")
     plt.plot(time_eval, pred_force[:, 1], label="LSTM Prediction")
     plt.xlabel("Time [s]")
     plt.ylabel("Rear Lateral Force [N]")
@@ -479,7 +485,31 @@ def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred
     plt.legend()
     plt.tight_layout()
     plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_rear_lateral_force.png", dpi=300)
-    plt.show()
+    if LOCAL_RUN:
+        plt.show()
+
+
+def save_lstm_results_mat(results_accumulator, output_path):
+    if not results_accumulator:
+        print("저장할 LSTM 추론 결과가 없습니다.")
+        return
+
+    # 시나리오 이름을 struct 필드명으로 쓰면 MATLAB 5 포맷의 31자 필드명 제한에 걸리는
+    # 시나리오가 있어(예: ISO14791_... 계열), 이름은 데이터 필드(Name)로 넣고
+    # 1xN struct array로 저장한다. MATLAB에서는 LSTMResults.Scenario(i).Name 로 조회.
+    scenario_names = list(results_accumulator.keys())
+    dtype = [("Name", "O"), ("Split", "O"), ("Time", "O"), ("Reference", "O"), ("LSTM_Pred", "O")]
+    scenario_array = np.empty((1, len(scenario_names)), dtype=dtype)
+    for i, scenario_name in enumerate(scenario_names):
+        result = results_accumulator[scenario_name]
+        scenario_array[0, i]["Name"] = scenario_name
+        scenario_array[0, i]["Split"] = result["Split"]
+        scenario_array[0, i]["Time"] = result["Time"]
+        scenario_array[0, i]["Reference"] = result["Reference"]
+        scenario_array[0, i]["LSTM_Pred"] = result["LSTM_Pred"]
+
+    savemat(output_path, {"LSTMResults": {"Scenario": scenario_array}})
+    print(f"Saved LSTM inference results: {output_path}")
 
 
 def zip_output(sequence_length, batch_size, num_epochs, hidden_size):
@@ -492,7 +522,8 @@ def zip_output(sequence_length, batch_size, num_epochs, hidden_size):
 
 
 def main():
-    ensure_dirs()
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
     dataset, split_data, scenario_names = mat_load()
     scenario_name_set = set(scenario_names)
 
@@ -538,7 +569,7 @@ def main():
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    num_epochs = 401
+    num_epochs = 30
     early_stopping_patience = 20
 
     train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
@@ -570,10 +601,15 @@ def main():
         },
     )
     plot_loss(train_loss_graph, val_loss_graph, best_epoch)
+    save_loss_curve_mat(train_loss_graph, val_loss_graph, best_epoch, best_val_loss, RESULT_DIR / LOSS_MAT_NAME)
 
     best_checkpoint = torch.load(MODEL_DIR / "lstm_best_model.pth", map_location=device)
     model.load_state_dict(best_checkpoint["model_state_dict"])
     model.eval()
+
+    # Validation/Test 모두 UKF와 비교하지 않고, LSTM_Dataset.mat의 reference 횡력과만 비교한다.
+    # UKF_Estimator.mat과의 비교는 여기서 저장하는 LSTM_Results.mat을 MATLAB에서 별도로 도시하여 수행한다.
+    lstm_results = {}
 
     validation_metrics_df = evaluate_scenario_list(
         scenario_list=val_scenarios,
@@ -585,6 +621,7 @@ def main():
         y_scaler=y_scaler,
         sequence_length=sequence_length,
         device=device,
+        results_accumulator=lstm_results,
     )
     print("Validation metrics summary")
     print(validation_metrics_df)
@@ -599,9 +636,12 @@ def main():
         y_scaler=y_scaler,
         sequence_length=sequence_length,
         device=device,
+        results_accumulator=lstm_results,
     )
     print("Test metrics summary")
     print(test_metrics_df)
+
+    save_lstm_results_mat(lstm_results, RESULT_DIR / RESULTS_MAT_NAME)
 
     zip_output(sequence_length, batch_size=128, num_epochs=num_epochs, hidden_size=16)
 
