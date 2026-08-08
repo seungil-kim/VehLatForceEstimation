@@ -634,7 +634,7 @@ def main():
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    num_epochs = 5
+    num_epochs = 400
     early_stopping_patience = 20
 
     train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
