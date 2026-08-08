@@ -311,8 +311,8 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
 
         if epoch % 10 == 0 or epoch == num_epochs - 1:
             print(
-                f"[Epoch {epoch:03d}] Train Loss: {train_loss:.6f} | "
-                f"Val Loss: {val_loss:.6f} | Best Val Loss: {best_val_loss:.6f} | "
+                f"[Epoch {epoch:03d}] Train Loss: {train_loss:.8e} | "
+                f"Val Loss: {val_loss:.8e} | Best Val Loss: {best_val_loss:.8e} | "
                 f"Patience: {patience_counter}/{patience}"
             )
 
@@ -531,6 +531,7 @@ def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred
     plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_front_lateral_force.png", dpi=300)
     if LOCAL_RUN:
         plt.show()
+    plt.close()
 
     plt.figure(figsize=(10, 4))
     plt.plot(time_eval, true_force[:, 1], label="Reference (Ground Truth)")
@@ -544,7 +545,7 @@ def plot_scenario_results(split_name, scenario_name, time_eval, true_force, pred
     plt.savefig(RESULT_DIR / f"{split_name}_{scenario_name}_rear_lateral_force.png", dpi=300)
     if LOCAL_RUN:
         plt.show()
-
+    plt.close()
 
 def save_lstm_results_mat(results_accumulator, output_path):
     if not results_accumulator:
@@ -603,7 +604,7 @@ def main():
         print("Unassigned scenarios:", unassigned_scenarios)
 
     x_scaler, y_scaler = build_scalers(dataset, train_scenarios)
-    sequence_length = 50
+    sequence_length = 100
     x_train_seq, y_train_seq, train_sample_counts = make_sequence_dataset(
         dataset, train_scenarios, x_scaler, y_scaler, sequence_length, "Train"
     )
@@ -636,7 +637,7 @@ def main():
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     num_epochs = 400
-    early_stopping_patience = 20
+    early_stopping_patience = 100
 
     train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
         model,
