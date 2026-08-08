@@ -359,7 +359,7 @@ def plot_loss(train_loss_graph, val_loss_graph, best_epoch):
     plt.figure(figsize=(9, 5))
     plt.semilogy(train_loss_graph, label="Train Loss")
     plt.semilogy(val_loss_graph, label="Validation Loss")
-    plt.axvline(best_epoch, linestyle="--", label=f"Best Epoch = {best_epoch}")
+    plt.axvline(best_epoch + 1, linestyle="--", label=f"Best Epoch = {best_epoch + 1}")
     plt.xlabel("Epoch")
     plt.ylabel("MSE Loss (log scale)")
     plt.title("LSTM Training and Validation Loss")
