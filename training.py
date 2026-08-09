@@ -625,10 +625,10 @@ def main():
     train_loader, val_loader = create_dataloaders(
         x_train_seq, y_train_seq, x_val_seq, y_val_seq, batch_size=128, train_sample_weights=train_sample_weights
     )
-
+    hidden_size = 32
     model = LSTM(
         input_size=x_train_seq.size(2),
-        hidden_size=16,
+        hidden_size=hidden_size,
         sequence_length=sequence_length,
         num_layers=2,
         device=device,
@@ -658,7 +658,7 @@ def main():
         {
             "sequence_length": sequence_length,
             "batch_size": 128,
-            "hidden_size": 16,
+            "hidden_size": hidden_size,
             "num_layers": 2,
             "learning_rate": 1e-3,
             "num_epochs": num_epochs,
@@ -710,7 +710,7 @@ def main():
 
     save_lstm_results_mat(lstm_results, RESULT_DIR / RESULTS_MAT_NAME)
 
-    zip_output(sequence_length, batch_size=128, num_epochs=num_epochs, hidden_size=16)
+    zip_output(sequence_length, batch_size=128, num_epochs=num_epochs, hidden_size=hidden_size)
 
 
 if __name__ == "__main__":
