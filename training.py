@@ -314,7 +314,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
             print(
                 f"[Epoch {epoch:03d}] Train Loss: {train_loss:.8e} | "
                 f"Val Loss: {val_loss:.8e} | Best Val Loss: {best_val_loss:.8e} | "
-                f"Patience: {patience_counter}/{patience}"
+                f"Patience: {patience_counter}/{patience} | "
                 f"Grad Norm: {grad_norm:.4f}"
             )
 
