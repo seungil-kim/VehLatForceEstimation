@@ -604,7 +604,7 @@ def main():
         print("Unassigned scenarios:", unassigned_scenarios)
 
     x_scaler, y_scaler = build_scalers(dataset, train_scenarios)
-    sequence_length = 100
+    sequence_length = 50
     x_train_seq, y_train_seq, train_sample_counts = make_sequence_dataset(
         dataset, train_scenarios, x_scaler, y_scaler, sequence_length, "Train"
     )
