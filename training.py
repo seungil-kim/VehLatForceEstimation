@@ -269,6 +269,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
             optimizer.zero_grad()
             loss = criterion(model(seq), target)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)   # ← 추가
             optimizer.step()
 
             batch_size_now = seq.size(0)
