@@ -269,7 +269,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
             optimizer.zero_grad()
             loss = criterion(model(seq), target)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)   # ← 추가
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             batch_size_now = seq.size(0)
@@ -315,6 +315,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
                 f"[Epoch {epoch:03d}] Train Loss: {train_loss:.8e} | "
                 f"Val Loss: {val_loss:.8e} | Best Val Loss: {best_val_loss:.8e} | "
                 f"Patience: {patience_counter}/{patience}"
+                f"Grad Norm: {grad_norm:.4f}"
             )
 
         if EARLYSTOPPING and patience_counter >= patience:
