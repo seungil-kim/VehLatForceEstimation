@@ -249,9 +249,9 @@ class LSTM(nn.Module):
         out = out.reshape(out.shape[0], -1)
         return self.fc(out)
 
-
 def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
-              num_epochs, patience, model_path, device):
+              num_epochs, patience, model_path, device,
+              warmup_epochs=200):   # ← 인자 추가
     train_loss_graph = []
     val_loss_graph = []
     best_val_loss = float("inf")
@@ -312,7 +312,8 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
         else:
             patience_counter += 1
 
-        scheduler.step(val_loss)
+        if epoch >= warmup_epochs:        # ← 이 조건만 추가
+            scheduler.step(val_loss)
 
         if epoch % 10 == 0 or epoch == num_epochs - 1:
             current_lr = optimizer.param_groups[0]['lr']
@@ -651,16 +652,9 @@ def main():
     early_stopping_patience = 100
 
     train_loss_graph, val_loss_graph, best_epoch, best_val_loss = fit_model(
-        model,
-        train_loader,
-        val_loader,
-        criterion,
-        optimizer,
-        scheduler,
-        num_epochs,
-        early_stopping_patience,
-        MODEL_DIR / "lstm_best_model.pth",
-        device,
+        model, train_loader, val_loader, criterion, optimizer, scheduler,
+        num_epochs, early_stopping_patience, MODEL_DIR / "lstm_best_model.pth", device,
+        warmup_epochs=200,
     )
 
     print(f"Best epoch: {best_epoch}, best validation loss: {best_val_loss:.6f}")
