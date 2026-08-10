@@ -643,8 +643,10 @@ def main():
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
-
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=30, min_lr=1e-5
+    )
+    
     num_epochs = 400
     early_stopping_patience = 100
 
