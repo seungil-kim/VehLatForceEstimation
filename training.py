@@ -250,7 +250,8 @@ class LSTM(nn.Module):
         return self.fc(out)
 
 
-def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, patience, model_path, device):
+def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
+              num_epochs, patience, model_path, device):
     train_loss_graph = []
     val_loss_graph = []
     best_val_loss = float("inf")
@@ -309,6 +310,8 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, num_epochs,
             }, model_path)
         else:
             patience_counter += 1
+
+        scheduler.step(val_loss)
 
         if epoch % 10 == 0 or epoch == num_epochs - 1:
             print(
@@ -638,6 +641,8 @@ def main():
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15)
+
     num_epochs = 400
     early_stopping_patience = 100
 
@@ -647,6 +652,7 @@ def main():
         val_loader,
         criterion,
         optimizer,
+        scheduler,
         num_epochs,
         early_stopping_patience,
         MODEL_DIR / "lstm_best_model.pth",
