@@ -315,6 +315,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
         scheduler.step(val_loss)
 
         if epoch % 10 == 0 or epoch == num_epochs - 1:
+            current_lr = optimizer.param_groups[0]['lr']
             print(
                 f"[Epoch {epoch:03d}] Train Loss: {train_loss:.8e} | "
                 f"Val Loss: {val_loss:.8e} | Best Val Loss: {best_val_loss:.8e} | "
