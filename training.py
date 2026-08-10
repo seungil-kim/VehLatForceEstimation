@@ -263,7 +263,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
         model.train()
         train_loss_sum = 0.0
         train_sample_count = 0
-
+        epoch_max_grad_norm = 0.0
         for seq, target in train_loader:
             seq = seq.to(device)
             target = target.to(device)
@@ -271,6 +271,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
             loss = criterion(model(seq), target)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            epoch_max_grad_norm = max(epoch_max_grad_norm, grad_norm.item())
             optimizer.step()
 
             batch_size_now = seq.size(0)
@@ -318,7 +319,7 @@ def fit_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
                 f"[Epoch {epoch:03d}] Train Loss: {train_loss:.8e} | "
                 f"Val Loss: {val_loss:.8e} | Best Val Loss: {best_val_loss:.8e} | "
                 f"Patience: {patience_counter}/{patience} | "
-                f"Grad Norm: {grad_norm:.4f}"
+                f"Grad Norm: {epoch_max_grad_norm:.4f} | LR: {current_lr:.2e}"
             )
 
         if EARLYSTOPPING and patience_counter >= patience:
